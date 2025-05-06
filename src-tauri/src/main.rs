@@ -49,7 +49,7 @@ fn generate_battery_icon(percentage: u32) -> Result<Image<'static>> {
 
     const SIZE: u32 = 64;
     let mut img = RgbaImage::new(SIZE, SIZE);
-    let font = FontRef::try_from_slice(include_bytes!("../assets/arial.ttf"))
+    let font = FontRef::try_from_slice(include_bytes!("../assets/ComicMono.ttf"))
         .context("failed to load font")?;
     let text = format!("{percentage}");
     let scale = find_scale_for_width(&font, &text, SIZE as f32);
