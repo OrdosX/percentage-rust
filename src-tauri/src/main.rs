@@ -2,11 +2,11 @@
 
 use std::{io::Cursor, sync::Arc, thread, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use battery::{Manager, State};
 use image::{Rgba, RgbaImage};
 use imageproc::drawing::draw_text_mut;
-use ab_glyph::{FontRef, PxScale};
+use ab_glyph::{FontRef, PxScale, Font, ScaleFont};
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
@@ -14,16 +14,48 @@ use tauri::{
 };
 use tokio::sync::{mpsc, Mutex};
 
+fn find_scale_for_width(font: &FontRef, text: &str, target_width: f32) -> PxScale {
+    let mut low = 1.0;
+    let mut high = 200.0;
+    let tolerance = 0.1;
+
+    while high - low > tolerance {
+        let mid = (low + high) / 2.0;
+        let scaled_font = font.as_scaled(PxScale::from(mid));
+        let width: f32 = text.chars().map(|c| scaled_font.h_advance(scaled_font.glyph_id(c))).sum();
+
+        if width < target_width {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+
+    PxScale::from((low + high) / 2.0)
+}
+
+fn compute_pos_from_scale(font: &FontRef, text: &str, scale: PxScale) -> (i32, i32) {
+    let scaled_font = font.as_scaled(scale);
+    let width: f32 = text.chars().map(|c| scaled_font.h_advance(scaled_font.glyph_id(c))).sum();
+    let char_height = scaled_font.height();
+    let x = (64.0 - width) / 2.0;
+    let y = (64.0 - char_height) / 2.0;
+    (x as i32, y as i32)
+}
+
 /// 生成电池电量图标（64x64，白底黑字）
 fn generate_battery_icon(percentage: u32) -> Result<Image<'static>> {
+    ensure!((0..=100).contains(&percentage), "Battery percentage must be between 0 and 100");
+
     const SIZE: u32 = 64;
     let mut img = RgbaImage::new(SIZE, SIZE);
     let font = FontRef::try_from_slice(include_bytes!("../assets/arial.ttf"))
         .context("failed to load font")?;
-    let scale = PxScale::from(SIZE as f32);
-    let text = format!("{percentage}%");
+    let text = format!("{percentage}");
+    let scale = find_scale_for_width(&font, &text, SIZE as f32);
+    let (x, y) = compute_pos_from_scale(&font, &text, scale);
 
-    draw_text_mut(&mut img, Rgba([0, 0, 0, 255]), 0, 0, scale, &font, &text);
+    draw_text_mut(&mut img, Rgba([0, 0, 0, 255]), x, y, scale, &font, &text);
 
     let mut icon_data = Cursor::new(Vec::new());
     img.write_to(&mut icon_data, image::ImageFormat::Ico)
