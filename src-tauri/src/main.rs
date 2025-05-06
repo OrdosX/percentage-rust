@@ -1,104 +1,119 @@
-// Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::tray::TrayIconBuilder;
-use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem};
-use std::io::Cursor;
-use image::{RgbaImage, Rgba};
+use std::{io::Cursor, sync::Arc, thread, time::Duration};
+
+use anyhow::{Context, Result};
+use battery::{Manager, State};
+use image::{Rgba, RgbaImage};
 use imageproc::drawing::draw_text_mut;
 use ab_glyph::{FontRef, PxScale};
-use anyhow::{Context, Result};
-use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
-use std::time::Duration;
-use battery::Manager;
-use std::thread;
+use tauri::{
+    image::Image,
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder, App,
+};
+use tokio::sync::{mpsc, Mutex};
 
+/// 生成电池电量图标（64x64，白底黑字）
 fn generate_battery_icon(percentage: u32) -> Result<Image<'static>> {
     const SIZE: u32 = 64;
-
     let mut img = RgbaImage::new(SIZE, SIZE);
     let font = FontRef::try_from_slice(include_bytes!("../assets/arial.ttf"))
         .context("failed to load font")?;
-
     let scale = PxScale::from(SIZE as f32);
     let text = format!("{percentage}%");
+
     draw_text_mut(&mut img, Rgba([0, 0, 0, 255]), 0, 0, scale, &font, &text);
 
-    let mut icon_data: Cursor<Vec<u8>> = Cursor::new(Vec::new());
+    let mut icon_data = Cursor::new(Vec::new());
     img.write_to(&mut icon_data, image::ImageFormat::Ico)
-        .context("failed to write ICO data")?;
+        .context("failed to encode icon to ICO")?;
 
-    let icon_img = Image::from_bytes(&icon_data.into_inner())
-        .context("failed to create Tauri image from bytes")?
-        .to_owned();
+    Image::from_bytes(&icon_data.into_inner())
+        .context("failed to create Tauri image")
+        .map(|img| img.to_owned())
+}
 
-    Ok(icon_img)
+/// 在独立线程中定期读取电池电量并发送消息
+fn spawn_battery_monitor(tx: mpsc::Sender<(u32, State)>) {
+    thread::spawn(move || {
+        let manager = Manager::new().expect("Failed to initialize battery manager");
+
+        loop {
+            if let Ok(batteries) = manager.batteries() {
+                for battery in batteries.flatten() {
+                    let percentage = (battery.state_of_charge().value * 100.0).round() as u32;
+                    let state = battery.state();
+
+                    if tx.blocking_send((percentage, state)).is_err() {
+                        eprintln!("Receiver dropped, exiting battery monitor thread");
+                        return;
+                    }
+                }
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
+/// 初始化托盘图标和菜单
+fn init_tray(app: &mut App) -> Result<(Arc<Mutex<tauri::tray::TrayIcon>>, mpsc::Receiver<(u32, State)>)> {
+    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&quit_item])?;
+
+    let tray_icon = TrayIconBuilder::new()
+        .icon(generate_battery_icon(100)?)
+        .menu(&menu)
+        .build(app)?;
+    let tray = Arc::new(Mutex::new(tray_icon));
+
+    let (tx, rx) = mpsc::channel(1);
+    spawn_battery_monitor(tx);
+
+    Ok((tray, rx))
+}
+
+/// 启动异步任务监听电池更新并修改托盘图标
+fn spawn_tray_updater(tray: Arc<Mutex<tauri::tray::TrayIcon>>, mut rx: mpsc::Receiver<(u32, State)>) {
+    tauri::async_runtime::spawn(async move {
+        while let Some((percentage, state)) = rx.recv().await {
+            if let Ok(icon) = generate_battery_icon(percentage) {
+                let tooltip = match state {
+                    State::Charging => format!("Charging: {}%", percentage),
+                    State::Discharging => format!("Discharging: {}%", percentage),
+                    State::Full => format!("Full"),
+                    _ => format!("Unhandled state: {}%", percentage)
+                };
+
+                let tray = tray.lock().await;
+                if let Err(e) = tray.set_icon(Some(icon)) {
+                    eprintln!("Failed to update tray icon: {}", e);
+                }
+                if let Err(e) = tray.set_tooltip(Some(&tooltip)) {
+                    eprintln!("Failed to update tray tooltip: {}", e);
+                }
+            }
+        }
+    });
 }
 
 #[tokio::main]
 async fn main() {
     tauri::Builder::default()
         .setup(|app| {
-            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&quit_i])?;
-            let tray = TrayIconBuilder::new()
-                .icon(generate_battery_icon(100)?)
-                .menu(&menu)
-                .build(app)?;
-            let tray = Arc::new(Mutex::new(tray));
-
-            let (tx, mut rx) = mpsc::channel::<(u32, battery::State)>(1);
-            thread::spawn(move || {
-                let manager = Manager::new().unwrap();
-                loop {
-                    if let Ok(batteries) = manager.batteries() {
-                        for battery in batteries {
-                            if let Ok(battery) = battery {
-                                let percentage = (battery.state_of_charge().value * 100.0).round() as u32;
-                                let battery_state = battery.state();
-                                if tx.blocking_send((percentage, battery_state)).is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-            });
-
-            let tray_clone = Arc::clone(&tray);
-            tauri::async_runtime::spawn(async move {
-                while let Some((percentage, battery_state)) = rx.recv().await {
-                    if let Ok(icon) = generate_battery_icon(percentage) {
-                        let tooltip = if battery_state == battery::State::Charging {
-                            format!("Charging: {}%", percentage)
-                        } else {
-                            format!("Discharging: {}%", percentage)
-                        };
-                        let tray = tray_clone.lock().await;
-                        if let Err(e) = tray.set_icon(Some(icon)) {
-                            eprintln!("Failed to set tray icon: {}", e);
-                        }
-                        if let Err(e) = tray.set_tooltip(Some(&tooltip)) {
-                            eprintln!("Failed to set tooltip: {}", e);
-                        }
-                    }
-                }
-            });
-
+            let (tray, rx) = init_tray(app)?;
+            spawn_tray_updater(tray, rx);
             Ok(())
         })
         .on_menu_event(|app, event| match event.id.as_ref() {
             "quit" => {
-                println!("quit menu item was clicked");
+                println!("User clicked quit");
                 app.exit(0);
             }
-            _ => {
-                println!("menu item {:?} not handled", event.id);
+            other => {
+                println!("Unhandled menu item: {:?}", other);
             }
         })
         .run(tauri::generate_context!())
-        .expect("error running Tauri app");
+        .expect("Error running Tauri app");
 }
