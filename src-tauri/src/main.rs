@@ -9,6 +9,11 @@ use image::{RgbaImage, Rgba};
 use imageproc::drawing::draw_text_mut;
 use ab_glyph::{FontRef, PxScale};
 use anyhow::{Context, Result};
+use std::sync::Arc;
+use tokio::sync::{Mutex, mpsc};
+use std::time::Duration;
+use battery::Manager;
+use std::thread;
 
 fn generate_battery_icon(percentage: u32) -> Result<Image<'static>> {
     const SIZE: u32 = 64;
@@ -18,13 +23,13 @@ fn generate_battery_icon(percentage: u32) -> Result<Image<'static>> {
         .context("failed to load font")?;
 
     let scale = PxScale::from(SIZE as f32);
-    let text = format!("{percentage}");
+    let text = format!("{percentage}%");
     draw_text_mut(&mut img, Rgba([0, 0, 0, 255]), 0, 0, scale, &font, &text);
-    
+
     let mut icon_data: Cursor<Vec<u8>> = Cursor::new(Vec::new());
     img.write_to(&mut icon_data, image::ImageFormat::Ico)
         .context("failed to write ICO data")?;
-    
+
     let icon_img = Image::from_bytes(&icon_data.into_inner())
         .context("failed to create Tauri image from bytes")?
         .to_owned();
@@ -32,24 +37,66 @@ fn generate_battery_icon(percentage: u32) -> Result<Image<'static>> {
     Ok(icon_img)
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&quit_i])?;
-            let _tray = TrayIconBuilder::new()
-                .icon(generate_battery_icon(42)?)
+            let tray = TrayIconBuilder::new()
+                .icon(generate_battery_icon(100)?)
                 .menu(&menu)
                 .build(app)?;
+            let tray = Arc::new(Mutex::new(tray));
+
+            let (tx, mut rx) = mpsc::channel::<(u32, battery::State)>(1);
+            thread::spawn(move || {
+                let manager = Manager::new().unwrap();
+                loop {
+                    if let Ok(batteries) = manager.batteries() {
+                        for battery in batteries {
+                            if let Ok(battery) = battery {
+                                let percentage = (battery.state_of_charge().value * 100.0).round() as u32;
+                                let battery_state = battery.state();
+                                if tx.blocking_send((percentage, battery_state)).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            });
+
+            let tray_clone = Arc::clone(&tray);
+            tauri::async_runtime::spawn(async move {
+                while let Some((percentage, battery_state)) = rx.recv().await {
+                    if let Ok(icon) = generate_battery_icon(percentage) {
+                        let tooltip = if battery_state == battery::State::Charging {
+                            format!("Charging: {}%", percentage)
+                        } else {
+                            format!("Discharging: {}%", percentage)
+                        };
+                        let tray = tray_clone.lock().await;
+                        if let Err(e) = tray.set_icon(Some(icon)) {
+                            eprintln!("Failed to set tray icon: {}", e);
+                        }
+                        if let Err(e) = tray.set_tooltip(Some(&tooltip)) {
+                            eprintln!("Failed to set tooltip: {}", e);
+                        }
+                    }
+                }
+            });
+
             Ok(())
         })
         .on_menu_event(|app, event| match event.id.as_ref() {
             "quit" => {
-              println!("quit menu item was clicked");
-              app.exit(0);
+                println!("quit menu item was clicked");
+                app.exit(0);
             }
             _ => {
-              println!("menu item {:?} not handled", event.id);
+                println!("menu item {:?} not handled", event.id);
             }
         })
         .run(tauri::generate_context!())
