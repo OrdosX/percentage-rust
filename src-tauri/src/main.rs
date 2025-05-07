@@ -44,14 +44,18 @@ fn compute_pos_from_scale(font: &FontRef, text: &str, scale: PxScale) -> (i32, i
 }
 
 /// 生成电池电量图标（64x64，白底黑字）
-fn generate_battery_icon(percentage: u32) -> Result<Image<'static>> {
+fn generate_battery_icon(percentage: u32, charging: bool) -> Result<Image<'static>> {
     ensure!((0..=100).contains(&percentage), "Battery percentage must be between 0 and 100");
+    let text = if charging {
+        format!("{percentage}*")
+    } else {
+        format!("{percentage}")
+    };
 
     const SIZE: u32 = 64;
     let mut img = RgbaImage::new(SIZE, SIZE);
     let font = FontRef::try_from_slice(include_bytes!("../assets/ComicMono.ttf"))
         .context("failed to load font")?;
-    let text = format!("{percentage}");
     let scale = find_scale_for_width(&font, &text, SIZE as f32);
     let (x, y) = compute_pos_from_scale(&font, &text, scale);
 
@@ -94,7 +98,7 @@ fn init_tray(app: &mut App) -> Result<(Arc<Mutex<tauri::tray::TrayIcon>>, mpsc::
     let menu = Menu::with_items(app, &[&quit_item])?;
 
     let tray_icon = TrayIconBuilder::new()
-        .icon(generate_battery_icon(100)?)
+        .icon(generate_battery_icon(100, false)?)
         .menu(&menu)
         .build(app)?;
     let tray = Arc::new(Mutex::new(tray_icon));
@@ -109,7 +113,7 @@ fn init_tray(app: &mut App) -> Result<(Arc<Mutex<tauri::tray::TrayIcon>>, mpsc::
 fn spawn_tray_updater(tray: Arc<Mutex<tauri::tray::TrayIcon>>, mut rx: mpsc::Receiver<(u32, State)>) {
     tauri::async_runtime::spawn(async move {
         while let Some((percentage, state)) = rx.recv().await {
-            if let Ok(icon) = generate_battery_icon(percentage) {
+            if let Ok(icon) = generate_battery_icon(percentage, state == State::Charging) {
                 let tooltip = match state {
                     State::Charging => format!("Charging: {}%", percentage),
                     State::Discharging => format!("Discharging: {}%", percentage),
