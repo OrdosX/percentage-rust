@@ -14,64 +14,77 @@ use tauri::{
 };
 use tokio::sync::{mpsc, Mutex};
 
-fn find_scale_for_width(font: &FontRef, text: &str, target_width: f32) -> PxScale {
-    let mut low = 1.0;
-    let mut high = 200.0;
-    let tolerance = 0.1;
+/// 电池图标生成器类
+pub struct BatteryIconGenerator {
+    font: FontRef<'static>,
+}
 
-    while high - low > tolerance {
-        let mid = (low + high) / 2.0;
-        let scaled_font = font.as_scaled(PxScale::from(mid));
-        let width: f32 = text.chars().map(|c| scaled_font.h_advance(scaled_font.glyph_id(c))).sum();
-
-        if width < target_width {
-            low = mid;
-        } else {
-            high = mid;
-        }
+impl BatteryIconGenerator {
+    pub fn new() -> Result<Self> {
+        let font = FontRef::try_from_slice(include_bytes!("../assets/ComicMono.ttf"))
+            .context("failed to load font")?;
+        Ok(Self { font })
     }
 
-    PxScale::from((low + high) / 2.0)
-}
+    /// 二分法寻找合适的宽度
+    fn find_scale_for_width(&self, text: &str, target_width: f32) -> PxScale {
+        let mut low = 1.0;
+        let mut high = 200.0;
+        let tolerance = 0.1;
 
-fn compute_pos_from_scale(font: &FontRef, text: &str, scale: PxScale) -> (i32, i32) {
-    let scaled_font = font.as_scaled(scale);
-    let width: f32 = text.chars().map(|c| scaled_font.h_advance(scaled_font.glyph_id(c))).sum();
-    let char_height = scaled_font.ascent();
-    let x = (64.0 - width) / 2.0;
-    let y = (64.0 - char_height) / 2.0;
-    (x as i32, y as i32)
-}
+        while high - low > tolerance {
+            let mid = (low + high) / 2.0;
+            let scaled_font = self.font.as_scaled(PxScale::from(mid));
+            let width: f32 = text.chars().map(|c| scaled_font.h_advance(scaled_font.glyph_id(c))).sum();
 
-/// 生成电池电量图标（64x64，白底黑字）
-fn generate_battery_icon(percentage: u32, charging: bool) -> Result<Image<'static>> {
-    ensure!((0..=100).contains(&percentage), "Battery percentage must be between 0 and 100");
-    let text = if charging {
-        format!("{percentage}*")
-    } else {
-        format!("{percentage}")
-    };
+            if width < target_width {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
 
-    const SIZE: u32 = 64;
-    let mut img = RgbaImage::new(SIZE, SIZE);
-    let font = FontRef::try_from_slice(include_bytes!("../assets/ComicMono.ttf"))
-        .context("failed to load font")?;
-    let scale = find_scale_for_width(&font, &text, SIZE as f32);
-    let (x, y) = compute_pos_from_scale(&font, &text, scale);
+        PxScale::from((low + high) / 2.0)
+    }
 
-    draw_text_mut(&mut img, Rgba([0, 0, 0, 255]), x, y, scale, &font, &text);
+    /// 计算字符坐标，使其水平垂直居中
+    fn compute_pos_from_scale(&self, text: &str, scale: PxScale) -> (i32, i32) {
+        let scaled_font = self.font.as_scaled(scale);
+        let width: f32 = text.chars().map(|c| scaled_font.h_advance(scaled_font.glyph_id(c))).sum();
+        let char_height = scaled_font.ascent();
+        let x = (64.0 - width) / 2.0;
+        let y = (64.0 - char_height) / 2.0;
+        (x as i32, y as i32)
+    }
 
-    let mut icon_data = Cursor::new(Vec::new());
-    img.write_to(&mut icon_data, image::ImageFormat::Ico)
-        .context("failed to encode icon to ICO")?;
+    /// 生成电池电量图标（64x64，白底黑字）
+    pub fn generate_icon(&self, percentage: u32, charging: bool) -> Result<Image<'static>> {
+        ensure!((0..=100).contains(&percentage), "Battery percentage must be between 0 and 100");
+        let text = if charging {
+            format!("{percentage}*")
+        } else {
+            format!("{percentage}")
+        };
 
-    Image::from_bytes(&icon_data.into_inner())
-        .context("failed to create Tauri image")
-        .map(|img| img.to_owned())
+        const SIZE: u32 = 64;
+        let mut img = RgbaImage::new(SIZE, SIZE);
+        let scale = self.find_scale_for_width(&text, SIZE as f32);
+        let (x, y) = self.compute_pos_from_scale(&text, scale);
+
+        draw_text_mut(&mut img, Rgba([0, 0, 0, 255]), x, y, scale, &self.font, &text);
+
+        let mut icon_data = Cursor::new(Vec::new());
+        img.write_to(&mut icon_data, image::ImageFormat::Ico)
+            .context("failed to encode icon to ICO")?;
+
+        Image::from_bytes(&icon_data.into_inner())
+            .context("failed to create Tauri image")
+            .map(|img| img.to_owned())
+    }
 }
 
 /// 在独立线程中定期读取电池电量并发送消息
-fn spawn_battery_monitor(tx: mpsc::Sender<(u32, State)>) {
+pub fn spawn_battery_monitor(tx: mpsc::Sender<(u32, State)>) {
     thread::spawn(move || {
         let manager = Manager::new().expect("Failed to initialize battery manager");
 
@@ -97,8 +110,9 @@ fn init_tray(app: &mut App) -> Result<(Arc<Mutex<tauri::tray::TrayIcon>>, mpsc::
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&quit_item])?;
 
+    let icon_generator = BatteryIconGenerator::new()?;
     let tray_icon = TrayIconBuilder::new()
-        .icon(generate_battery_icon(100, false)?)
+        .icon(icon_generator.generate_icon(100, false)?)
         .menu(&menu)
         .build(app)?;
     let tray = Arc::new(Mutex::new(tray_icon));
@@ -112,8 +126,9 @@ fn init_tray(app: &mut App) -> Result<(Arc<Mutex<tauri::tray::TrayIcon>>, mpsc::
 /// 启动异步任务监听电池更新并修改托盘图标
 fn spawn_tray_updater(tray: Arc<Mutex<tauri::tray::TrayIcon>>, mut rx: mpsc::Receiver<(u32, State)>) {
     tauri::async_runtime::spawn(async move {
+        let icon_generator = BatteryIconGenerator::new().unwrap();
         while let Some((percentage, state)) = rx.recv().await {
-            if let Ok(icon) = generate_battery_icon(percentage, state == State::Charging) {
+            if let Ok(icon) = icon_generator.generate_icon(percentage, state == State::Charging) {
                 let tooltip = match state {
                     State::Charging => format!("Charging: {}%", percentage),
                     State::Discharging => format!("Discharging: {}%", percentage),
