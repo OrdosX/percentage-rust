@@ -31,6 +31,15 @@ impl BatteryIconGenerator {
         })
     }
 
+    /// 构造字符串，充电时添加星号，充满显示笑脸
+    fn build_text(&self, percentage: u32, charging: bool) -> String {
+        match (charging, percentage > 97) {
+            (true, true) => "^_^".to_string(),
+            (true, false) => format!("{percentage}*"),
+            (false, _) => format!("{percentage}"),
+        }
+    }
+
     /// 计算字符串宽高
     fn measure_text(&self, text: &str, scale: PxScale) -> (f32, f32) {
         let scaled_font = self.font.as_scaled(scale);
@@ -92,12 +101,7 @@ impl BatteryIconGenerator {
             return Ok(cached_icon.clone());
         }
 
-        let text = if charging {
-            format!("{percentage}*")
-        } else {
-            format!("{percentage}")
-        };
-
+        let text = self.build_text(percentage, charging);
         let scale = self.find_scale_for_width(&text);
         let (width, height) = self.measure_text(&text, scale);
         let (x, y) = self.compute_position(width, height);
