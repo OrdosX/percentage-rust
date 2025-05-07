@@ -23,7 +23,7 @@ impl BatteryIconGenerator {
     const SIZE: u32 = 64;
     pub fn new() -> Result<Self> {
         let font = FontRef::try_from_slice(include_bytes!("../assets/ComicMono.ttf"))
-            .context("failed to load font")?;
+            .context("Failed to load font")?;
         Ok(Self { font })
     }
 
@@ -78,10 +78,10 @@ impl BatteryIconGenerator {
 
         let mut icon_data = Cursor::new(Vec::new());
         img.write_to(&mut icon_data, image::ImageFormat::Ico)
-            .context("failed to encode icon to ICO")?;
+            .context("Failed to encode icon to ICO")?;
 
         let icon_image = Image::from_bytes(&icon_data.into_inner())
-            .context("failed to create Tauri image")?
+            .context("Failed to create Tauri image")?
             .to_owned();
 
         Ok(icon_image)
@@ -96,10 +96,8 @@ impl BatteryIconGenerator {
         let (width, height) = self.measure_text(&text, scale);
         let (x, y) = self.compute_position(width, height);
 
-        let icon_image = self.render_icon(x, y, scale, &text)
-            .context("failed to render icon")?;
-
-        Ok(icon_image)
+        self.render_icon(x, y, scale, &text)
+            .context("Failed to render icon")
     }
 }
 
