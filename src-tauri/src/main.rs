@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::{io::Cursor, sync::Arc, thread, time::Duration};
+use std::{collections::HashMap, io::Cursor, sync::Arc, thread, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use battery::{Manager, State};
@@ -17,13 +17,17 @@ use tokio::sync::{mpsc, Mutex};
 /// 电池图标生成器类
 pub struct BatteryIconGenerator {
     font: FontRef<'static>,
+    cache: Mutex<HashMap<(u32, bool), Image<'static>>>,
 }
 
 impl BatteryIconGenerator {
     pub fn new() -> Result<Self> {
         let font = FontRef::try_from_slice(include_bytes!("../assets/ComicMono.ttf"))
             .context("failed to load font")?;
-        Ok(Self { font })
+        Ok(Self {
+            font,
+            cache: Mutex::new(HashMap::new()),
+        })
     }
 
     /// 二分法寻找合适的宽度
@@ -58,8 +62,15 @@ impl BatteryIconGenerator {
     }
 
     /// 生成电池电量图标（64x64，白底黑字）
-    pub fn generate_icon(&self, percentage: u32, charging: bool) -> Result<Image<'static>> {
+    pub async fn generate_icon(&self, percentage: u32, charging: bool) -> Result<Image<'static>> {
         ensure!((0..=100).contains(&percentage), "Battery percentage must be between 0 and 100");
+
+        // 尝试从缓存获取
+        let key = (percentage, charging);
+        if let Some(cached_icon) = self.cache.lock().await.get(&key) {
+            return Ok(cached_icon.clone());
+        }
+
         let text = if charging {
             format!("{percentage}*")
         } else {
@@ -77,9 +88,13 @@ impl BatteryIconGenerator {
         img.write_to(&mut icon_data, image::ImageFormat::Ico)
             .context("failed to encode icon to ICO")?;
 
-        Image::from_bytes(&icon_data.into_inner())
-            .context("failed to create Tauri image")
-            .map(|img| img.to_owned())
+        let icon_image = Image::from_bytes(&icon_data.into_inner())
+            .context("failed to create Tauri image")?
+            .to_owned();
+
+        self.cache.lock().await.insert(key, icon_image.clone());
+
+        Ok(icon_image)
     }
 }
 
@@ -110,9 +125,7 @@ fn init_tray(app: &mut App) -> Result<(Arc<Mutex<tauri::tray::TrayIcon>>, mpsc::
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&quit_item])?;
 
-    let icon_generator = BatteryIconGenerator::new()?;
     let tray_icon = TrayIconBuilder::new()
-        .icon(icon_generator.generate_icon(100, false)?)
         .menu(&menu)
         .build(app)?;
     let tray = Arc::new(Mutex::new(tray_icon));
@@ -128,7 +141,7 @@ fn spawn_tray_updater(tray: Arc<Mutex<tauri::tray::TrayIcon>>, mut rx: mpsc::Rec
     tauri::async_runtime::spawn(async move {
         let icon_generator = BatteryIconGenerator::new().unwrap();
         while let Some((percentage, state)) = rx.recv().await {
-            if let Ok(icon) = icon_generator.generate_icon(percentage, state == State::Charging) {
+            if let Ok(icon) = icon_generator.generate_icon(percentage, state == State::Charging).await {
                 let tooltip = match state {
                     State::Charging => format!("Charging: {}%", percentage),
                     State::Discharging => format!("Discharging: {}%", percentage),
