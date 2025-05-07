@@ -21,6 +21,7 @@ pub struct BatteryIconGenerator {
 }
 
 impl BatteryIconGenerator {
+    const SIZE: u32 = 64;
     pub fn new() -> Result<Self> {
         let font = FontRef::try_from_slice(include_bytes!("../assets/ComicMono.ttf"))
             .context("failed to load font")?;
@@ -30,18 +31,32 @@ impl BatteryIconGenerator {
         })
     }
 
+    /// 计算字符串宽高
+    fn measure_text(&self, text: &str, scale: PxScale) -> (f32, f32) {
+        let scaled_font = self.font.as_scaled(scale);
+        let width = text.chars().map(|c| scaled_font.h_advance(scaled_font.glyph_id(c))).sum();
+        let height = scaled_font.ascent();
+        (width, height)
+    }
+
+    /// 计算字符串坐标，使其水平垂直居中
+    fn compute_position(&self, width: f32, height: f32) -> (i32, i32) {
+        let x = (BatteryIconGenerator::SIZE as f32 - width) / 2.0;
+        let y = (BatteryIconGenerator::SIZE as f32 - height) / 2.0;
+        (x as i32, y as i32)
+    }
+
     /// 二分法寻找合适的宽度
-    fn find_scale_for_width(&self, text: &str, target_width: f32) -> PxScale {
+    fn find_scale_for_width(&self, text: &str) -> PxScale {
+        const TOLERANCE: f32 = 0.1;
+
         let mut low = 1.0;
         let mut high = 200.0;
-        let tolerance = 0.1;
 
-        while high - low > tolerance {
+        while high - low > TOLERANCE {
             let mid = (low + high) / 2.0;
-            let scaled_font = self.font.as_scaled(PxScale::from(mid));
-            let width: f32 = text.chars().map(|c| scaled_font.h_advance(scaled_font.glyph_id(c))).sum();
-
-            if width < target_width {
+            let (width, _) = self.measure_text(text, PxScale::from(mid));
+            if width < BatteryIconGenerator::SIZE as f32 {
                 low = mid;
             } else {
                 high = mid;
@@ -51,14 +66,20 @@ impl BatteryIconGenerator {
         PxScale::from((low + high) / 2.0)
     }
 
-    /// 计算字符坐标，使其水平垂直居中
-    fn compute_pos_from_scale(&self, text: &str, scale: PxScale) -> (i32, i32) {
-        let scaled_font = self.font.as_scaled(scale);
-        let width: f32 = text.chars().map(|c| scaled_font.h_advance(scaled_font.glyph_id(c))).sum();
-        let char_height = scaled_font.ascent();
-        let x = (64.0 - width) / 2.0;
-        let y = (64.0 - char_height) / 2.0;
-        (x as i32, y as i32)
+    /// 绘制图标并转为Tauri Image对象
+    fn render_icon(&self, x: i32, y: i32, scale: PxScale, text: &str) -> Result<Image<'static>> {
+        let mut img = RgbaImage::new(BatteryIconGenerator::SIZE, BatteryIconGenerator::SIZE);
+        draw_text_mut(&mut img, Rgba([0, 0, 0, 255]), x, y, scale, &self.font, &text);
+
+        let mut icon_data = Cursor::new(Vec::new());
+        img.write_to(&mut icon_data, image::ImageFormat::Ico)
+            .context("failed to encode icon to ICO")?;
+
+        let icon_image = Image::from_bytes(&icon_data.into_inner())
+            .context("failed to create Tauri image")?
+            .to_owned();
+
+        Ok(icon_image)
     }
 
     /// 生成电池电量图标（64x64，白底黑字）
@@ -77,20 +98,12 @@ impl BatteryIconGenerator {
             format!("{percentage}")
         };
 
-        const SIZE: u32 = 64;
-        let mut img = RgbaImage::new(SIZE, SIZE);
-        let scale = self.find_scale_for_width(&text, SIZE as f32);
-        let (x, y) = self.compute_pos_from_scale(&text, scale);
+        let scale = self.find_scale_for_width(&text);
+        let (width, height) = self.measure_text(&text, scale);
+        let (x, y) = self.compute_position(width, height);
 
-        draw_text_mut(&mut img, Rgba([0, 0, 0, 255]), x, y, scale, &self.font, &text);
-
-        let mut icon_data = Cursor::new(Vec::new());
-        img.write_to(&mut icon_data, image::ImageFormat::Ico)
-            .context("failed to encode icon to ICO")?;
-
-        let icon_image = Image::from_bytes(&icon_data.into_inner())
-            .context("failed to create Tauri image")?
-            .to_owned();
+        let icon_image = self.render_icon(x, y, scale, &text)
+            .context("failed to render icon")?;
 
         self.cache.lock().await.insert(key, icon_image.clone());
 
