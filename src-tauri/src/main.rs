@@ -37,7 +37,7 @@ fn find_scale_for_width(font: &FontRef, text: &str, target_width: f32) -> PxScal
 fn compute_pos_from_scale(font: &FontRef, text: &str, scale: PxScale) -> (i32, i32) {
     let scaled_font = font.as_scaled(scale);
     let width: f32 = text.chars().map(|c| scaled_font.h_advance(scaled_font.glyph_id(c))).sum();
-    let char_height = scaled_font.height();
+    let char_height = scaled_font.ascent();
     let x = (64.0 - width) / 2.0;
     let y = (64.0 - char_height) / 2.0;
     (x as i32, y as i32)
