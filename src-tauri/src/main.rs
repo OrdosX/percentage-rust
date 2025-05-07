@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::{collections::HashMap, io::Cursor, sync::Arc, thread, time::Duration};
+use std::{io::Cursor, sync::Arc, thread, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use battery::{Manager, State};
@@ -17,7 +17,6 @@ use tokio::sync::{mpsc, Mutex};
 /// 电池图标生成器类
 pub struct BatteryIconGenerator {
     font: FontRef<'static>,
-    cache: Mutex<HashMap<(u32, bool), Image<'static>>>,
 }
 
 impl BatteryIconGenerator {
@@ -25,10 +24,7 @@ impl BatteryIconGenerator {
     pub fn new() -> Result<Self> {
         let font = FontRef::try_from_slice(include_bytes!("../assets/ComicMono.ttf"))
             .context("failed to load font")?;
-        Ok(Self {
-            font,
-            cache: Mutex::new(HashMap::new()),
-        })
+        Ok(Self { font })
     }
 
     /// 构造字符串，充电时添加星号，充满显示笑脸
@@ -95,12 +91,6 @@ impl BatteryIconGenerator {
     pub async fn generate_icon(&self, percentage: u32, charging: bool) -> Result<Image<'static>> {
         ensure!((0..=100).contains(&percentage), "Battery percentage must be between 0 and 100");
 
-        // 尝试从缓存获取
-        let key = (percentage, charging);
-        if let Some(cached_icon) = self.cache.lock().await.get(&key) {
-            return Ok(cached_icon.clone());
-        }
-
         let text = self.build_text(percentage, charging);
         let scale = self.find_scale_for_width(&text);
         let (width, height) = self.measure_text(&text, scale);
@@ -109,26 +99,27 @@ impl BatteryIconGenerator {
         let icon_image = self.render_icon(x, y, scale, &text)
             .context("failed to render icon")?;
 
-        self.cache.lock().await.insert(key, icon_image.clone());
-
         Ok(icon_image)
     }
 }
 
 /// 在独立线程中定期读取电池电量并发送消息
-pub fn spawn_battery_monitor(tx: mpsc::Sender<(u32, State)>) {
+fn spawn_battery_monitor(tx: mpsc::Sender<(u32, State)>) {
     thread::spawn(move || {
         let manager = Manager::new().expect("Failed to initialize battery manager");
+        let mut last_battery_info: Option<(u32, State)> = None;
 
         loop {
             if let Ok(batteries) = manager.batteries() {
-                for battery in batteries.flatten() {
+                if let Some(battery) = batteries.flatten().next() {
                     let percentage = (battery.state_of_charge().value * 100.0).round() as u32;
                     let state = battery.state();
 
-                    if tx.blocking_send((percentage, state)).is_err() {
-                        eprintln!("Receiver dropped, exiting battery monitor thread");
-                        return;
+                    if Some((percentage, state)) != last_battery_info {
+                        last_battery_info = Some((percentage, state));
+
+                        tx.blocking_send((percentage, state))
+                            .expect("Failed to send battery info");
                     }
                 }
             }
