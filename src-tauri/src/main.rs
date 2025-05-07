@@ -2,17 +2,22 @@
 
 use std::{io::Cursor, sync::Arc, thread, time::Duration};
 
-use anyhow::{Context, Result, ensure};
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
+use anyhow::{ensure, Context, Result};
 use battery::{Manager, State};
 use image::{Rgba, RgbaImage};
 use imageproc::drawing::draw_text_mut;
-use ab_glyph::{FontRef, PxScale, Font, ScaleFont};
 use tauri::{
+    async_runtime,
     image::Image,
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder, App,
+    tray::{TrayIcon, TrayIconBuilder},
+    App,
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{
+    mpsc::{channel, Receiver, Sender},
+    Mutex,
+};
 
 /// 电池图标生成器类
 pub struct BatteryIconGenerator {
@@ -102,7 +107,7 @@ impl BatteryIconGenerator {
 }
 
 /// 在独立线程中定期读取电池电量并发送消息
-fn spawn_battery_monitor(tx: mpsc::Sender<(u32, State)>) {
+fn spawn_battery_monitor(tx: Sender<(u32, State)>) {
     thread::spawn(move || {
         let manager = Manager::new().expect("Failed to initialize battery manager");
         let mut last_battery_info: Option<(u32, State)> = None;
@@ -127,24 +132,22 @@ fn spawn_battery_monitor(tx: mpsc::Sender<(u32, State)>) {
 }
 
 /// 初始化托盘图标和菜单
-fn init_tray(app: &mut App) -> Result<(Arc<Mutex<tauri::tray::TrayIcon>>, mpsc::Receiver<(u32, State)>)> {
+fn init_tray(app: &mut App) -> Result<(Arc<Mutex<tauri::tray::TrayIcon>>, Receiver<(u32, State)>)> {
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&quit_item])?;
 
-    let tray_icon = TrayIconBuilder::new()
-        .menu(&menu)
-        .build(app)?;
+    let tray_icon = TrayIconBuilder::new().menu(&menu).build(app)?;
     let tray = Arc::new(Mutex::new(tray_icon));
 
-    let (tx, rx) = mpsc::channel(1);
+    let (tx, rx) = channel(1);
     spawn_battery_monitor(tx);
 
     Ok((tray, rx))
 }
 
 /// 启动异步任务监听电池更新并修改托盘图标
-fn spawn_tray_updater(tray: Arc<Mutex<tauri::tray::TrayIcon>>, mut rx: mpsc::Receiver<(u32, State)>) {
-    tauri::async_runtime::spawn(async move {
+fn spawn_tray_updater(tray: Arc<Mutex<TrayIcon>>, mut rx: Receiver<(u32, State)>) {
+    async_runtime::spawn(async move {
         let icon_generator = BatteryIconGenerator::new().unwrap();
         while let Some((percentage, state)) = rx.recv().await {
             if let Ok(icon) = icon_generator.generate_icon(percentage, state == State::Charging).await {
@@ -152,7 +155,7 @@ fn spawn_tray_updater(tray: Arc<Mutex<tauri::tray::TrayIcon>>, mut rx: mpsc::Rec
                     State::Charging => format!("Charging: {}%", percentage),
                     State::Discharging => format!("Discharging: {}%", percentage),
                     State::Full => format!("Full"),
-                    _ => format!("Unhandled state: {}%", percentage)
+                    _ => format!("Unhandled state: {}%", percentage),
                 };
 
                 let tray = tray.lock().await;
