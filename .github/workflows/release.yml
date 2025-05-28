@@ -4,6 +4,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号 (例如: v0.1.0)'
+        required: true
+        default: 'v0.1.0'
 
 jobs:
   release:
@@ -14,11 +19,6 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -34,8 +34,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'v__VERSION__'
+          tagName: ${{ github.event.inputs.version || github.ref_name }}
+          releaseName: '${{ github.event.inputs.version || github.ref_name }}'
           releaseBody: ''
           releaseDraft: true
           prerelease: false
