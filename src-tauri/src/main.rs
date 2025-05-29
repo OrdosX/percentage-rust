@@ -8,16 +8,14 @@ use battery::{Manager, State};
 use image::{Rgba, RgbaImage};
 use imageproc::drawing::draw_text_mut;
 use tauri::{
-    async_runtime,
-    image::Image,
-    menu::{Menu, MenuItem},
-    tray::{TrayIcon, TrayIconBuilder},
-    App,
+    async_runtime, image::Image, menu::{Menu, MenuItem}, tray::{TrayIcon, TrayIconBuilder}, App, AppHandle, Wry
 };
 use tokio::sync::{
     mpsc::{channel, Receiver, Sender},
     Mutex,
 };
+use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_autostart::ManagerExt;
 
 /// 电池图标生成器类
 pub struct BatteryIconGenerator {
@@ -131,12 +129,33 @@ fn spawn_battery_monitor(tx: Sender<(u32, State)>) {
     });
 }
 
-/// 初始化托盘图标和菜单
-fn init_tray(app: &mut App) -> Result<(Arc<Mutex<tauri::tray::TrayIcon>>, Receiver<(u32, State)>)> {
-    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&quit_item])?;
+fn init_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
+    let autostart_status = app
+        .autolaunch()
+        .is_enabled()
+        .unwrap_or(false);
+    let autostart_item = MenuItem::with_id(
+        app,
+        "autostart",
+        format!("{} autostart", if autostart_status { "Disable" } else { "Enable" }),
+        true,
+        None::<&str>,
+    )?;
+    let quit_item = MenuItem::with_id(
+        app, 
+        "quit", 
+        "Quit", 
+        true, 
+        None::<&str>
+    )?;
+    Menu::with_items(app, &[&autostart_item, &quit_item])
+}
 
-    let tray_icon = TrayIconBuilder::new().menu(&menu).build(app)?;
+/// 初始化托盘图标和菜单
+fn init_tray(app: &mut App) -> Result<(Arc<Mutex<TrayIcon>>, Receiver<(u32, State)>)> {
+    let tray_icon = TrayIconBuilder::with_id("tray_id")
+        .menu(&init_menu(app.handle())?)
+        .build(app)?;
     let tray = Arc::new(Mutex::new(tray_icon));
 
     let (tx, rx) = channel(1);
@@ -174,6 +193,11 @@ fn spawn_tray_updater(tray: Arc<Mutex<TrayIcon>>, mut rx: Receiver<(u32, State)>
 async fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            app.handle().plugin(tauri_plugin_autostart::init(
+                MacosLauncher::LaunchAgent,
+                None,
+            )).context("Error initializing autostart plugin")?;
+
             let (tray, rx) = init_tray(app)?;
             spawn_tray_updater(tray, rx);
             Ok(())
@@ -182,6 +206,17 @@ async fn main() {
             "quit" => {
                 println!("User clicked quit");
                 app.exit(0);
+            }
+            "autostart" => {
+                let autostart = app.autolaunch();
+                let enabled = autostart.is_enabled().unwrap_or(false);
+                if enabled {
+                    let _ = autostart.disable();
+                } else {
+                    let _ = autostart.enable();
+                }
+                let tray = app.tray_by_id("tray_id").expect("Failed to get tray handle");
+                tray.set_menu(init_menu(app).ok()).expect("Failed to update tray menu");
             }
             other => {
                 println!("Unhandled menu item: {:?}", other);
